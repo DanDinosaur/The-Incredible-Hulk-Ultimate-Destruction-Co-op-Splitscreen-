@@ -1,0 +1,148 @@
+# Hulk Recompiled
+
+<a href="https://recomplauncher.com/game/hulk-ultimate-destruction-recomp-xbox-ver"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
+A native Windows port and static recompilation of the original Xbox version of **The Incredible Hulk: Ultimate Destruction**, built on [Xbox XBE Recomp](https://github.com/TGP482/XboxXBE-Recomp).
+
+> [!IMPORTANT]
+> **No game assets or ISO files are included in this repository.**
+> Users must provide their own legal retail copy of *The Incredible Hulk: Ultimate Destruction* (Xbox). Place your game `.iso` (any file name) or the extracted game files with `default.xbe` into the `assets/` directory.
+
+## Download & Play
+
+1. Download `HulkRecompiled-<version>-windows-x64.zip` from [Releases](https://github.com/lookingcoding/hulk-ultimate-destruction-recomp-xbox-ver-/releases) and extract it.
+2. Put your Xbox disc image (`.iso`) in the `assets` folder.
+3. Run `Hulk Recompiled.exe`. It loads your disc and starts the game; the game itself, its settings and saves are in the `game` folder: settings in `game\settings.toml`, saves in `game\hdd\E\` (the Xbox hard disk's save partition), and logs in `game\logs\`.
+
+The game checks your disc image when it starts and tells you if it can't use it. The first launch builds the game's code from your disc with the included `compiler` folder, which takes a few minutes and needs about 1 GB of free space; later launches start straight away.
+
+---
+
+## Features & Improvements
+
+- **Mouse camera controls:**
+  - Windows Raw Input (`WM_INPUT`), with cursor-delta fallback when raw input is unavailable.
+  - Mouse input accounts for elapsed time and the camera deadzone. Extra input polls do not repeat movement. Motion above the stick limit is discarded; mouse input stops at the next sample when the mouse stops.
+  - Independent X/Y sensitivity sliders and vertical inversion in **Options > Controls / Keybinds**.
+  - Fast swipes do not queue rotation or smoothing after movement stops. Controller/stick behavior is unchanged.
+- **Direct Mouse Hit-Testing & Menu Navigation:**
+  - Hovering a menu row or tab highlights it and clicking selects it. The port reads the game's real highlighted row and steps the D-pad until it matches the one under the pointer, so greyed-out rows, wrapping and every list length work.
+  - Clicking a tab (Options / Story Mode / Extras) from inside a list goes back and opens that tab. Clicking or scrolling on a selector changes its value.
+  - Clicking off every row does nothing. In dialogs the left click is the A button.
+- **Button prompts follow your input device:** with no controller plugged in, tooltips name your keys and mouse buttons (e.g. "Walk Hulk around with [WASD]", "press [Q] to pick it up"); with a controller they show its buttons. The game reads its strings as it loads, so plugging in or unplugging a controller mid-game shows from the next load. The menus' bottom prompt ("[Enter] Select  [Q] Back", Delete on save screens) changes at once, and the title screen asks for Enter instead of START. The HUD's mission hints name the key too ("[Space] Jump to City" on a jump pad). `settings.toml`'s `button_prompts` picks the tooltips when both are in use: `"auto"` (a controller's while one is plugged in, else the keyboard's), `"keyboard"`, `"controller"` or `"playstation"` (PlayStation wording, e.g. "[Cross]", "[Circle]", "[Square]", "[Triangle]", "[L2]"; the disc's font draws the Xbox glyphs, so PlayStation wording is text — a coloured-icon font is a possible later addition).
+- **Camera not inverted by default:** Invert X-Axis and Invert Y-Axis start at No, and No now means the camera follows the stick (the original game labelled it the other way round). Your choice is kept in `settings.toml`, the same for every save.
+- **Display Options in the game's own Options menu:**
+  - Main menu > Options and the pause menu's Options each have a **Display Options** row, built from the game's own frontend script, art, fonts and transitions, and driven by the controller or keyboard like every other row. Its strings are added in English, French, Spanish and Italian.
+  - **Display Mode:** Fullscreen, Borderless, Windowed.
+  - **Resolution:** Desktop, 1280x720, 1600x900, 1920x1080, 2560x1440, 3840x2160 (a size set in `settings.toml` shows as Custom).
+  - **Frame Rate Limit:** 30, 60, 120, 144, monitor refresh rate, unlimited. 60 is the default and the most tested choice; above 60 is less tested.
+  - **V-Sync** and **Render Scale** (50% to 200%).
+  - **Field of View:** Default, +5, +10, +15, +20, +30 degrees added to the game's horizontal field of view (91° in play on a widescreen output). It applies at once, including behind a paused game, and to every 3D view the game draws, cutscenes included. `settings.toml`: `fov_increase` (0 to 60).
+  - **Render Distance:** Default, 150%, 200%, 300%, 400%. It moves the far plane and the level's fog out together; the fog is what limits how far you can see in this game, so a higher setting shows distant scenery more clearly. Pushing the fog back also shows what the fog was hiding, for example a bright sky glow behind the junkyard. `settings.toml`: `render_distance` (50 to 1000, percent).
+  - **Camera Distance (mouse wheel):** in play, the mouse wheel zooms the camera closer (up) or farther (down) behind Hulk, about 12% a notch from 40% to 250% of the game's distance. The camera glides to the new distance rather than jumping, and the choice is saved. The game's own easing and combat pull-back still apply on top. `settings.toml`: `camera_distance` (40 to 250, percent).
+  - **Language (restart):** English, Français, Español, Italiano. The game reads it once at start, so restart after changing it. French and Italian have their own voices; Spanish has Spanish text with English voices, as on the disc. `settings.toml`: `language = "english" | "french" | "spanish" | "italian"`.
+- `settings.toml` also takes `aspect = "auto" | "4:3" | "16:9"`: the game draws 4:3, so on a widescreen output `"4:3"` shows it pillarboxed instead of stretched (the automatic default reports a widescreen TV to the game, which this title does not use).
+  - Changes apply once the selection settles and persist in `settings.toml`. The game's files are not modified: the runtime serves edited `frontend\fe_real.txt` (main menu), `frontend\fe_run.txt` (pause menu) and string tables through a view of `misc.rcf` (see `src/common/display_menu.cpp`).
+- **Cheats in the game's Options menu:** a **Cheats** screen next to Display Options, in all four languages. Each cheat switches on and off at any time and is kept in `settings.toml`; none of them writes unlocks or progress to your save.
+  - **Invulnerability**, **Infinite Rage** (the rage meter stays full), **Infinite Health**, **Fast Regeneration**.
+  - **Hulk Damage:** normal, 2x, 4x or one-hit kills. **Game Speed:** normal, half or quarter speed.
+  - **Movement Cheats:** **Super Jump** (about three times as high) and **Low Gravity**.
+- **Mod Support:**
+  - Put each mod in its own folder inside `mods` (next to `assets`; the game creates it with a `README.txt` on first launch). A file in a mod's folder replaces the game's file with the same path, even inside the `.rcf` archives: `mods\My Modrontend\lang\str_en.txt` replaces the English text table inside `misc.rcf`, `mods\My Modrt\copyright-en.p3d` replaces that model inside `art.rcf`. A disc-level path such as `mods\My Mod\misc.rcf` replaces the whole archive.
+  - `Hulk Mod Tool.exe` copies every file out of your game (17,415 files, about 2.8 GB) into `Game Files`, with the paths mods use and a `file list.txt` saying which archive holds each one.
+  - Mods load in folder-name order, and when two mods replace the same file the later name wins. Put `_` at the start of a folder name to turn that mod off. Your game files are never changed; `logs\hulk.log` lists every mod file the game used.
+  - Limits: mods can replace files but not add new ones, and the game's `.lua` scripts are compiled Lua 5.1 bytecode with 32-bit float numbers. Whether the game also loads plain-text Lua is untested.
+- **Native 64-bit Recompilation, Direct3D 12 or 11:**
+  - Runs natively on modern 64-bit Windows systems.
+  - Draws with Direct3D 12, and falls back to a Direct3D 11 renderer by itself on graphics cards and drivers without Direct3D 12 (for example GeForce GTX 400/500, Radeon HD 5000/6000, older Intel graphics). `settings.toml`: `renderer = "d3d11"` uses Direct3D 11 always; `"auto"` (the default) tries Direct3D 12 first. `logs\hulk.log` says which one runs.
+  - Vertex buffer synchronization, video playback (Bink), and fiber context switching.
+
+---
+
+## PC Controls
+
+Open **Options > Controls / Keybinds** from the main menu or pause menu. The parent page contains **Keybinds**, **Invert mouse Y**, separate **Mouse sensitivity X/Y** sliders and **Reset mouse defaults**. It uses the game's own fonts, background, selection bars and navigation, like Display Options.
+
+Open **Keybinds** to change keyboard and mouse bindings. Each row shows **Primary | Alternate**; use **Actions** to browse all 28 actions, seven per page. Select a row, choose **Primary** or **Alternate**, then press a key, mouse button, or wheel direction. Escape/controller B cancels capture. **More...** offers **Add** (additional inputs) and **Unbind** (clear the row). Extra inputs appear as `(+N)`; More shows the full list. Conflicts offer **Replace**, **Keep both**, and **Cancel** in the game's native popup. Binding changes save immediately.
+
+**Reset keybinds to defaults** asks for confirmation and resets bindings. The parent's **Reset mouse defaults** separately restores both sensitivities and mouse inversion. Sliders apply immediately and save after settling. Back returns to Controls.
+
+Sensitivity multipliers range from 0.1 to 5.0, with both axes defaulting to 1.0. These keys go at the top level of `game/settings.toml`, before `[bindings]` (source builds use `settings.toml` beside the game executable):
+
+```toml
+mouse_sensitivity_x = 1.0
+mouse_sensitivity_y = 1.0
+mouse_invert_y = false
+mouse_smoothing = false
+```
+
+The older `mouse_sensitivity` value initializes both axes; explicit X/Y values override it. Game hints update after rebinding or resetting without restarting. Full hints show primary and alternate inputs; compact menu footers show the primary key. Controller and PlayStation prompts retain their button labels.
+
+Bindings are stored in the `[bindings]` table of `game/settings.toml`. Each action accepts a name or an array of names. `[]` or `"unbound"` disables an action. Missing or invalid entries use that action's defaults; an invalid array falls back as a whole. Names are case-insensitive, including letters, digits, F1-F24, arrows, Space, Enter, Escape, Tab, Delete, Shift/Ctrl/Alt and their Left/Right variants, Num0-Num9, MouseLeft/MouseRight/MouseMiddle/MouseX1/MouseX2, and WheelUp/Down/Left/Right.
+
+```toml
+[bindings]
+move_up = ["W", "Up"]
+attack = ["MouseLeft", "K"]
+menu_select = ["Enter"]
+zoom_in = ["WheelUp"]
+taunt = [] # unbound
+```
+
+`menu_select` selects ordinary menu rows and advances selectors once per press. It is separate from gameplay `jump` (Space/Enter) and menu `menu_confirm` (Space/left click), matching the existing defaults. Controller bindings are unchanged.
+
+Keyboard and mouse input is mapped to player 1 alongside any connected Xbox/PlayStation controller. These are the defaults:
+
+| PC Control | Action | Xbox Controller Equivalent |
+| :--- | :--- | :--- |
+| **Mouse Move** | Camera Look (in gameplay) / Menu Aim | Right Analog Stick / Direct Hover |
+| **Left Click** | Light Attack / Punch (gameplay) / Select (menus) | X Button / A Button |
+| **Right Click** | Guard / Lock-On (gameplay) / Back (menus) | Left Trigger (LT) / B Button |
+| **Mouse Wheel** | Menu Item Scroll | D-Pad Up / Down |
+| **Mouse Wheel** (in play) | Camera Closer / Farther | — |
+| **W / A / S / D** | Movement | Left Analog Stick |
+| **Space** | Jump / Charge Jump / Select | A Button |
+| **Enter** | Select (menus) / Next value (option rows, including Cheats) | A Button / D-Pad Right |
+| **Q** | Grab / Pick Up / Throw / Back | B Button |
+| **Delete** | Delete (save screens) | X Button |
+| **E** | Special / Critical Mass / Ground Slam | Y Button |
+| **Left Shift** | Sprint / Wall Run / Evade | Right Trigger (RT) |
+| **Esc** | Pause / Main Menu / Back | Start Button / Back |
+| **Tab** | Map / Objectives | Back Button |
+| **C** | Reset Camera Behind Hulk | Left Stick Click (L3) |
+| **V** | Taunt | Right Stick Click (R3) |
+| **1 / 2** | Cycle Target / Smash Camera | White / Black Buttons |
+
+---
+
+## Building from Source
+
+### Prerequisites
+- Windows 10/11 64-bit.
+- Visual Studio 2022 C++ Build Tools (with CMake and Ninja).
+- Clang/LLVM toolchain.
+- Retail disc image (.iso) or extracted game files.
+
+### Steps
+1. Clone the repository with submodules:
+   ```cmd
+   git clone --recurse-submodules https://github.com/lookingcoding/hulk-ultimate-destruction-recomp-xbox-ver-.git
+   cd hulk-ultimate-destruction-recomp-xbox-ver-
+   ```
+2. Place your disc image or `default.xbe` in the `assets/` folder.
+3. Run the automated build script:
+   ```cmd
+   build.bat
+   ```
+4. Launch the game using:
+   ```cmd
+   play.bat
+   ```
+
+---
+
+## License & Credits
+
+- Xbox XBE Recomp by TGP482 (MIT); third-party credits in `sdk/THIRD_PARTY.txt`.
+- Kernel export structures follow nxdk (CC0).
+- This project is an independent recompilation effort. The Incredible Hulk: Ultimate Destruction is property of its respective copyright holders.

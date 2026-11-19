@@ -1,0 +1,436 @@
+#include "common/bindings.h"
+#include "common/binding_prompts.h"
+#include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <vector>
+#include "app/app.h"
+#include "common/display_menu.h"
+#include "common/native_controls.h"
+#include "common/cheats.h"
+#include "common/language.h"
+#include "common/view.h"
+#include "kernel/kernel.h"
+namespace hulk { bool BackgroundTest() { return false; } }
+
+// Serve the real misc.rcf through the display menu's view and read it back as the game's cement library reader does.
+namespace app {
+static Settings settings;
+static int applied = 0, saved = 0;
+Settings& Get() { return settings; }
+void ApplyDisplay() { applied++; }
+void Save() { saved++; }
+}  // namespace app
+namespace logx {
+void Write(Level, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    std::vprintf(fmt, args);
+    va_end(args);
+    std::printf("\n");
+}
+}  // namespace logx
+namespace kernel {
+uint8_t* g_base;
+static std::vector<std::pair<std::string, std::vector<uint32_t>>> registered;  // name, functor
+static uint32_t next_alloc = 0x10000;
+// the screen's widgets: name -> address, each a TextSelector whose vtable's SetSelection is kSetSelection
+static std::vector<std::string> widgets;
+static std::vector<std::pair<uint32_t, uint32_t>> selections;  // widget, index
+constexpr uint32_t kWidgets = 0x40000, kVtable = 0x50000, kSetSelection = 0x777000;
+uint32_t CallGuest(X86Context& ctx, uint32_t fn, const uint32_t* args, size_t count) {
+    if (fn == 0x0008D730 && count == 1) {
+        uint32_t p = next_alloc;
+        next_alloc += (args[0] + 15) & ~15u;
+        return p;
+    }
+    if ((fn == 0x000FC420 || fn == 0x000FC400 || fn == 0xFC440) && count == 2) {
+        registered.push_back({reinterpret_cast<const char*>(g_base + args[0]), {R32(args[1]), R32(args[1] + 4), R32(args[1] + 8)}});
+        return 0;
+    }
+    if (fn == 0x000FC480 && count == 1) {
+        widgets.push_back(reinterpret_cast<const char*>(g_base + args[0]));
+        uint32_t w = kWidgets + uint32_t(widgets.size()) * 16;
+        W32(w, kVtable);
+        W32(kVtable + 0x64, kSetSelection);
+        return w;
+    }
+    if (fn == 0x00340764 && count == 5 && args[2] == 0x0049FCE4 && args[3] == 0x0049FCFC) return args[0];
+    if (fn == kSetSelection && count == 1) {
+        selections.push_back({ctx.ecx, args[0]});
+        return 0;
+    }
+    std::printf("unexpected guest call %08X\n", fn);
+    return 0;
+}
+}  // namespace kernel
+
+static int failures = 0;
+static bool Check(bool value, const char* message) {
+    if (!value) {
+        std::printf("FAIL: %s\n", message);
+        failures++;
+    }
+    return value;
+}
+
+static uint32_t U32(const std::vector<uint8_t>& b, size_t at) {
+    uint32_t v = 0;
+    std::memcpy(&v, b.data() + at, 4);
+    return v;
+}
+
+static std::string Utf16(const std::vector<uint8_t>& b) {
+    std::string s;
+    std::u16string raw(reinterpret_cast<const char16_t*>(b.data() + 2), (b.size() - 2) / 2);
+    for (char16_t c : hulk::ExpandBindingPrompts(raw)) s += c > 127 ? '?' : char(c);
+    return s;
+}
+
+int main(int argc, char** argv) {
+    hulk::SetHudHintPrompt("TBS_INSTRUCTION_JUMP_CITY", "se");
+    hulk::SetHudHintPrompt("TBS_INSTRUCTION_DROP", "us");
+    hulk::SetHudHintPrompt("TBS_INSTRUCTION_WEAPONIZE", "sp");
+    auto context_map = hulk::bindings::Defaults();
+    context_map.inputs[size_t(hulk::bindings::Action::ResetCamera)] = {'F'};
+    context_map.inputs[size_t(hulk::bindings::Action::White)] = {'T'};
+    hulk::bindings::Set(context_map);
+    const char* path = argc > 1 ? argv[1] : "assets/misc.rcf";
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        std::printf("SKIP: %s is not here\n", path);
+        return 0;
+    }
+    std::vector<uint8_t> own((std::istreambuf_iterator<char>(in)), {});
+    auto read = [&](uint64_t at, void* dst, size_t n) -> size_t {
+        if (at >= own.size()) return 0;
+        n = std::min<size_t>(n, own.size() - at);
+        std::memcpy(dst, own.data() + at, n);
+        return n;
+    };
+
+    app::settings.display_mode = app::DisplayMode::Borderless;
+    app::settings.width = 1920, app::settings.height = 1080;
+    app::settings.fps_cap = 90;  // not a choice: Custom
+    app::settings.vsync = true;
+    app::settings.render_percent = 100;
+    hulk::SetFovIncrease(15);
+    hulk::SetRenderDistance(250);  // not a choice: Custom
+    hulk::SetLanguage(hulk::Language::Spanish);
+    hulk::cheats::Load(hulk::cheats::Cheat::Damage, 2);  // x4
+    hulk::cheats::Load(hulk::cheats::Cheat::InfiniteRage, 1);
+
+    Check(!hulk::GameFileView("D:\\art.rcf", own.size(), read), "only misc.rcf gets a view");
+    auto view = hulk::GameFileView("D:\\misc.rcf", own.size(), read);
+    if (!Check(view != nullptr, "misc.rcf gets a view")) return 1;
+    Check(view->size > own.size(), "the edited files lengthen the archive");
+
+    // the archive as the game reads it: its own bytes, zeros past the end, then the view
+    auto served = [&] {
+        std::vector<uint8_t> b(view->size, 0);
+        read(0, b.data(), own.size());
+        view->read(0, b.data(), b.size());
+        return b;
+    };
+    std::vector<uint8_t> rcf = served();
+    Check(std::memcmp(rcf.data(), own.data(), U32(own, 0x24)) == 0, "the header stays");
+
+    // the directory's entries for the original files, matched by hash
+    uint32_t dir = U32(own, 0x24), count = U32(own, 0x38);
+    auto extract = [&](const std::vector<uint8_t>& served) {
+        std::vector<std::string> out_scripts, out_tables;
+        size_t out_moved = 0;
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t off = U32(served, dir + i * 12 + 4), size = U32(served, dir + i * 12 + 8);
+            Check(U32(served, dir + i * 12) == U32(own, dir + i * 12), "hashes stay");
+            if (off == U32(own, dir + i * 12 + 4)) continue;
+            out_moved++;
+            Check(off >= own.size() && off % 0x800 == 0 && off + size <= served.size(), "moved files sit aligned past the end");
+            std::vector<uint8_t> file(served.begin() + off, served.begin() + off + size);
+            if (file.size() > 2 && file[0] == 0xFF && file[1] == 0xFE) out_tables.push_back(Utf16(file));
+            else out_scripts.emplace_back(file.begin(), file.end());
+        }
+        return std::make_pair(std::move(out_scripts), std::move(out_tables));
+    };
+    auto [scripts, tables] = extract(rcf);
+    size_t moved = scripts.size() + tables.size();
+    // the European disc has five string tables, the North American one English only
+    Check(scripts.size() == 2 && (tables.size() == 5 || tables.size() == 1) && moved == scripts.size() + tables.size(),
+          "fe_real.txt, fe_run.txt and each string table moved");
+    bool french_cheats = false;
+    for (const std::string& t : tables) {
+        Check(t.find("TBS_PC_DISPLAY_OPTIONS\t") != std::string::npos, "string tables have the menu's keys");
+        Check(t.find("TBS_PC_CHEAT_INFINITE_RAGE\t") != std::string::npos && t.find("TBS_PC_BIND_PAGE\t") != std::string::npos &&
+                  t.find("TBS_PC_DAMAGE_ONE_HIT\t") != std::string::npos && t.find("TBS_PC_SCALE_25\t") != std::string::npos,
+              "string tables have the cheats' keys");
+        french_cheats |= t.find("TBS_PC_CHEAT_INFINITE_RAGE\tRage infinie") != std::string::npos;
+        Check(t.find("TBS_MENU_ITEM_OM_CAMERA_OPTIONS\t") != std::string::npos, "string tables keep their own");
+    }
+    Check(tables.size() == 1 || french_cheats, "the cheats' lines in each language");
+    Check(tables[0].find("TBS_HINT_CAMERAS_2\tPress [F] to reset the camera") != std::string::npos,
+          "camera reset hint uses its rebound action rather than generic mouse look");
+    Check(tables[0].find("using [T] to cycle to the next available target") != std::string::npos &&
+          tables[0].find("Then use [T] to switch targets") != std::string::npos,
+          "target cycling hint uses its rebound action rather than generic mouse look");
+    Check(tables[0].find("TBS_HINT_TARGETING_3\t[Right Click] Using the target button") != std::string::npos &&
+          tables[0].find("TBS_HINT_C2M3_3\t[Hold Space / Enter]") != std::string::npos,
+          "word-only targeting and charged-jump instructions also identify the current bindings");
+    // without a controller the prompts are the keyboard's; the map legend's icons stay
+    Check(tables[0].find("press [Q] to pick it up") != std::string::npos && tables[0].find("\\bus") == std::string::npos &&
+              tables[0].find("\\bmh Hulk") != std::string::npos,
+          "keyboard prompts in place of the controller's");
+    Check(tables[0].find("Press [Space / Left Click] to start the exercise") != std::string::npos, "the select button's prompt is the A button's key");
+    Check(tables[0].find("TBS_MENU_ITEM_PRESS_START2_XBOX\tPress [Enter]") != std::string::npos &&
+              tables[0].find("TBS_MENU_ITEM_PRESS_START3\tPress any key") != std::string::npos &&
+              tables[0].find("TBS_MENU_ITEM_PRESS_START\t[Space / Left Click] Start") != std::string::npos,
+          "the title screen asks for Enter and any key, not START or a controller glyph");
+    Check(tables[0].find("TBS_INSTRUCTION_JUMP_CITY\t[Space / Enter] Jump to City") != std::string::npos &&
+              tables[0].find("TBS_INSTRUCTION_DROP\t[Q] Drop Item") != std::string::npos &&
+              tables[0].find("TBS_INSTRUCTION_WEAPONIZE\t[E] Weaponize") != std::string::npos,
+          "the HUD's hint lines name the key that does it");
+    // the PlayStation's wording, settings.toml's button_prompts = "playstation" (issue #11): the shapes named in
+    // text, the controller's \b codes gone, and it switches at read time without rebuilding the archive
+    hulk::SetPromptDevice(hulk::PromptDevice::Playstation);
+    std::vector<uint8_t> ps_served = served();
+    auto [ps_scripts, ps_tables] = extract(ps_served);
+    Check(ps_scripts.size() == 2 && (ps_tables.size() == 5 || ps_tables.size() == 1), "the playstation serving moves the same files");
+    const std::string& ps = ps_tables[0];
+    Check(ps.find("[Cross]") != std::string::npos && ps.find("[Circle]") != std::string::npos &&
+              ps.find("[Square]") != std::string::npos && ps.find("[Triangle]") != std::string::npos,
+          "playstation prompts name all four shapes");
+    Check(ps.find("\\bus") == std::string::npos && ps.find("\\bse") == std::string::npos,
+          "playstation prompts leave no controller codes in the text");
+    Check(ps.find("TBS_MENU_ITEM_PRESS_START2_XBOX\tPress Cross") != std::string::npos &&
+              ps.find("TBS_INSTRUCTION_DROP\t[Circle] Drop Item") != std::string::npos &&
+              ps.find("TBS_INSTRUCTION_WEAPONIZE\t[Triangle] Weaponize") != std::string::npos,
+          "the title and the HUD's hints in the PlayStation's words");
+    Check(ps_served.size() == rcf.size(), "the playstation tables are the same length");
+    hulk::SetPromptDevice(hulk::PromptDevice::Auto);
+    std::vector<uint8_t> back = served();
+    Check(std::memcmp(back.data(), rcf.data(), back.size()) == 0, "back to the keyboard's prompts");
+    std::string main_menu, pause_menu;
+    for (const std::string& s : scripts) (s.find("AddScreen \"main\"") != std::string::npos ? main_menu : pause_menu) = s;
+    // Options > Cheats (cheats.h): a row after Display Options, two screens of selectors, levels as they are
+    for (const std::string* script : {&main_menu, &pause_menu}) {
+        const bool main = script == &main_menu;
+        const size_t options = script->find("AddScreen \"options\"");
+        const size_t row = script->find("        text \"TBS_MENU_ITEM_SF_CHEATS\" 1\r\n        OnSelect gotoscreen \"pc_cheats\"", options);
+        Check(options < row && row < script->find("AddScreen", options + 1), "its Options screen has a Cheats row");
+        Check(script->find(main ? "AddTextButton \"FEmain_left_item6\"\r\n    {\r\n        text \"TBS_MENU_ITEM_SF_CHEATS\""
+                                : "AddTextButton \"FEpause_text5\"\r\n    {\r\n        text \"TBS_MENU_ITEM_SF_CHEATS\"") != std::string::npos,
+              "the Cheats row's slot follows Display Options'");
+        const size_t first = script->find("AddScreen \"pc_cheats\""), second = script->find("AddScreen \"pc_controls\"");
+        Check(first != std::string::npos && second != std::string::npos && first < second &&
+                  second < script->find("AddScreen \"camera_options\""),
+              "both cheat screens are before Camera Options");
+        if (first == std::string::npos || second == std::string::npos) continue;
+        const std::string page1 = script->substr(first, script->find("AddScreen", first + 1) - first);
+        size_t screens = 0;
+        for (size_t at = script->find("\nAddScreen \""); at != std::string::npos; at = script->find("\nAddScreen \"", at + 1))
+            screens++;
+        if (script->find("AddScreen \"init_progressive_check\"") != std::string::npos) screens--;  // GameCube only
+        Check(screens - 1 <= 64, "native cache has 64 slots plus the owned Keybinds page");
+        Check(script->find("AddNamedValueInt \"PCCheatInvulnerability\"") < first, "the cheats' named values come before their screens");
+        const std::string page2 = script->substr(second, script->find("AddScreen", second + 1) - second);
+        Check(script->find("AddNamedValueInt \"PCCheatDamage\" 2 \"PCCheatDamageChanged\"") != std::string::npos &&
+                  script->find("AddNamedValueInt \"PCCheatInfiniteRage\" 1 \"PCCheatInfiniteRageChanged\"") != std::string::npos &&
+                  script->find("AddNamedValueInt \"PCCheatInvulnerability\" 0 \"PCCheatInvulnerabilityChanged\"") != std::string::npos,
+              "the cheats' named values start at their levels");
+        Check(page1.find("text \"TBS_CHEAT_INVULNERABILITY\"") != std::string::npos &&
+                  page1.find("NamedValue \"PCCheatInfiniteRage\"") != std::string::npos &&
+                  page1.find("NamedValue \"PCCheatInfiniteHealth\"") != std::string::npos &&
+                  page1.find("NamedValue \"PCCheatRegeneration\"") != std::string::npos &&
+                  page1.find("TBS_CHEAT_RENDER_MODE_NORMAL TBS_PC_DAMAGE_X2 TBS_PC_DAMAGE_X4 TBS_PC_DAMAGE_ONE_HIT") != std::string::npos &&
+                  page1.find("TBS_PC_SCALE_100 TBS_PC_SCALE_75 TBS_PC_SCALE_50 TBS_PC_SCALE_25") != std::string::npos,
+              "the combat cheats' selectors and choices");
+        Check(page1.find("TextSelection \"\" TBS_MENU_ITEM_CHOICE_OFF TBS_MENU_ITEM_CHOICE_ON\r\n        NamedValue \"PCCheatInvulnerability\"") !=
+                  std::string::npos,
+              "a toggle's choices are in level order, off first");
+        Check(page1.find("NamedValue \"PCCheatSuperJump\"") != std::string::npos, "movement cheats remain on Cheats");
+        Check((page1.find("OnSelect gotoscreen \"cheats\"") != std::string::npos) == main,
+              "the main menu's Cheats leads to the game's Code Input, the pause menu's has none");
+        Check(page1.find("NamedValue \"PCCheatSuperJump\"") != std::string::npos &&
+                  page1.find("text \"TBS_CHEAT_LOW_GRAVITY\"") != std::string::npos &&
+                  page2.find("SuperSpeed") == std::string::npos,
+              "the movement cheats' selectors");
+        Check(page1.find("OnHighlight function \"PCCheatSync\"") != std::string::npos, "the cheat selectors sync on highlight");
+        const char* last = main ? "AddTextButton \"FEsubMenu_text9\"" : "AddTextSelector \"FEpause_text8\"";
+        Check(page1.find(last) != std::string::npos && page1.find(main ? "FEsubMenu_text10" : "FEpause_text9") == std::string::npos,
+              "the Cheats screen fits the screen's slots");
+        Check(page1.find("CheatAllMoves") == std::string::npos && page1.find("UnlockAll") == std::string::npos &&
+                  page1.find("AwardCheatersSmashPoints") == std::string::npos && page2.find("Award") == std::string::npos,
+              "no unlock or progression controls");
+    }
+    // the main menu's first Cheats screen takes the place of the disc's developer cheat screen (unlock-all buttons):
+    // its debug builds' Extras link opens the Cheats screen
+    Check(main_menu.find("dev_cheats") == std::string::npos && main_menu.find("UpdateCheatsScreen") == std::string::npos &&
+              main_menu.find("OnSelect gotoscreen \"pc_cheats\"", main_menu.find("AddScreen \"extras\"")) <
+                  main_menu.find("AddScreen", main_menu.find("AddScreen \"extras\"") + 1),
+          "the developer cheat screen is replaced and its link opens Cheats");
+    for (const std::string* script : {&main_menu, &pause_menu}) {
+        Check(script->find("AddScreen \"display_options\"") != std::string::npos, "each script has the Display Options screen");
+        size_t options = script->find("AddScreen \"options\"");
+        size_t item = script->find("        text \"TBS_PC_DISPLAY_OPTIONS\" 1\r\n        OnSelect gotoscreen \"display_options\"");
+        size_t next_screen = script->find("AddScreen", options + 1);
+        Check(options < item && item < next_screen, "its Options screen has a row opening it");
+        const size_t controls = script->find("        text \"TBS_PC_CONTROLS\" 1\r\n        OnSelect gotoscreen \"pc_controls\"");
+        Check(options < controls && controls < next_screen, "main and pause Options open the in-game Controls panel");
+        Check(script->find("AddNamedValueInt \"PCDisplayMode\" 1 \"PCDisplayModeChanged\"") != std::string::npos, "borderless selected");
+        Check(script->find("AddNamedValueInt \"PCResolution\" 3 \"PCResolutionChanged\"") != std::string::npos, "1920 x 1080 selected");
+        Check(script->find("AddNamedValueInt \"PCFrameRate\" 6 \"PCFrameRateChanged\"") != std::string::npos, "custom fps selected");
+        Check(script->find("TBS_PC_FPS_UNLIMITED TBS_PC_CUSTOM\r\n") != std::string::npos, "custom fps is a choice");
+        Check(script->find("AddNamedValueInt \"PCVSync\" 0 \"PCVSyncChanged\"") != std::string::npos, "vsync on selected");
+        Check(script->find("AddNamedValueInt \"PCRenderScale\" 2 \"PCRenderScaleChanged\"") != std::string::npos, "100% selected");
+        Check(script->find("AddNamedValueInt \"PCFieldOfView\" 3 \"PCFieldOfViewChanged\"") != std::string::npos, "+15 selected");
+        Check(script->find("AddNamedValueInt \"PCRenderDistance\" 5 \"PCRenderDistanceChanged\"") != std::string::npos &&
+                  script->find("TBS_PC_SCALE_400 TBS_PC_CUSTOM\r\n        NamedValue \"PCRenderDistance\"") != std::string::npos,
+              "a render distance outside the choices is Custom");
+        Check(script->find("        OnHighlight function \"PCDisplaySync\"\r\n") != std::string::npos, "the selectors sync on highlight");
+        Check(script->find("TBS_MENU_ITEM_NO TBS_MENU_ITEM_YES\r\n        NamedValue \"CameraInvertX\"") != std::string::npos &&
+                  script->find("TBS_MENU_ITEM_NO TBS_MENU_ITEM_YES\r\n        NamedValue \"CameraInvertY\"") != std::string::npos,
+              "Invert X and Y name the camera that looks up with the stick No");
+    }
+    Check(main_menu.find("AddTextButton \"FEmain_left_item5\"\r\n    {\r\n        text \"TBS_PC_DISPLAY_OPTIONS\"") != std::string::npos &&
+              main_menu.find("AddTextSelector \"FEsubMenu_text8\"") != std::string::npos,
+          "the main menu's slots");
+    Check(main_menu.find("ifplatform PS2 GAMECUBE\r\n{\r\n    AddTextSelector \"FEmain_left_item5\"") != std::string::npos,
+          "the PS2 and GameCube widescreen row stays");
+    Check(pause_menu.find("AddTextButton \"FEpause_text4\"\r\n    {\r\n        text \"TBS_PC_DISPLAY_OPTIONS\"") != std::string::npos &&
+              pause_menu.find("AddTextSelector \"FEpause_text8\"") != std::string::npos &&
+              pause_menu.find("        TransitionAnimEnter \"slide_down8\"") != std::string::npos,
+          "the pause menu's slots and select bars");
+    if (argc > 2) std::ofstream(argv[2], std::ios::binary).write(main_menu.data(), std::streamsize(main_menu.size()));
+    if (argc > 3) std::ofstream(argv[3], std::ios::binary).write(pause_menu.data(), std::streamsize(pause_menu.size()));
+
+    // the selectors' callbacks: registered after the game's own, then called with the selection
+    std::vector<uint8_t> memory(0x100000);
+    kernel::g_base = memory.data();
+    {
+        auto map = hulk::bindings::Defaults();
+        map.inputs[size_t(hulk::bindings::Action::MenuBack)] = {'K'};
+        hulk::bindings::Set(map);
+        hulk::MenuButtonPrompts(0x2000);
+        const auto* icon = reinterpret_cast<const char16_t*>(memory.data() + 0x2000 + 0x1884 + 0x80);
+        Check(hulk::ExpandBindingPrompts(std::u16string(icon)) == u"[K]", "native Back hint uses current binding immediately");
+        hulk::bindings::Reset();
+        hulk::MenuButtonPrompts(0x2000);
+        Check(hulk::ExpandBindingPrompts(std::u16string(icon)) == u"[Q]", "native Back hint returns to default immediately after reset");
+    }
+
+    X86Context ctx{};
+    ctx.esp = 0x80000;
+    hulk::RegisterDisplayCallbacks(ctx);
+    Check(ctx.esp == 0x80000, "the guest's stack is as it was");
+    Check(kernel::registered.size() == 32, "display and cheat callbacks plus the Controls entry");
+    if (kernel::registered.size() == 32) {
+        Check(kernel::registered[1].first == "PCResolutionChanged", "named as the script names them");
+        Check(kernel::registered[1].second == std::vector<uint32_t>({0x409B40, 0x101, 0xBBEC0}), "functor through the shared handler");
+        Check(kernel::registered[6].first == "PCRenderDistanceChanged", "the render distance's");
+        Check(kernel::registered[7].first == "PCLanguageChanged", "the language's");
+        Check(kernel::registered[8].first == "PCDisplaySync", "the sync");
+        Check(kernel::registered[8].second == std::vector<uint32_t>({0x409B30, 0x108, 0xB46B0}), "sync through Print");
+        Check(kernel::registered[9].first == "PCCheatInvulnerabilityChanged" &&
+                  kernel::registered[9].second == std::vector<uint32_t>({0x409B40, 0x120, 0xBBEC0}),
+              "the cheats' callbacks through the shared handler");
+        Check(kernel::registered[13].first == "PCCheatDamageChanged" && kernel::registered[13].second[1] == 0x124, "the damage's");
+        Check(kernel::registered[17].first == "PCCheatSync" &&
+                  kernel::registered[17].second == std::vector<uint32_t>({0x409B30, 0x11F, 0xB46B0}),
+              "the cheats' sync through Print");
+    }
+    Check(kernel::registered.back().first == "PCBindingPageChanged", "native Controls callbacks registered");
+    Check(!hulk::DisplaySync(ctx, 0x00123456), "a real Print owner goes to the game");
+    ctx.ecx = 0xABCD;
+    Check(hulk::DisplaySync(ctx, 0x108), "the sync");
+    Check(ctx.esp == 0x80000 && ctx.ecx == 0xABCD, "the sync leaves the registers as they were");
+    Check(kernel::widgets == std::vector<std::string>({"pc_display_mode_selector", "pc_resolution_selector",
+                                                        "pc_frame_rate_selector", "pc_vsync_selector", "pc_render_scale_selector",
+                                                        "pc_fov_selector", "pc_render_distance_selector",
+                                                        "pc_language_selector"}),
+          "each selector found by its name");
+    Check(kernel::selections == std::vector<std::pair<uint32_t, uint32_t>>({{0x40010, 1}, {0x40020, 3}, {0x40030, 6}, {0x40040, 0}, {0x40050, 2},
+                                                                                 {0x40060, 3}, {0x40070, 5}, {0x40080, 2}}),
+          "each set to the current setting");
+    // the cheats' sync sets each cheat selector of the screen to its level; a choice selects the level and saves
+    kernel::widgets.clear();
+    kernel::selections.clear();
+    Check(hulk::DisplaySync(ctx, 0x11F) && ctx.esp == 0x80000 && ctx.ecx == 0xABCD, "the cheats' sync");
+    Check(kernel::widgets.size() == 8 && kernel::widgets[0] == "pc_cheat_Invulnerability_selector" &&
+              kernel::widgets[4] == "pc_cheat_Damage_selector",
+          "each cheat selector found by its name");
+    Check(kernel::selections.size() == 8 && kernel::selections[1].second == 1 && kernel::selections[4].second == 2 &&
+              kernel::selections[0].second == 0,
+          "each set to its cheat's level");
+    Check(hulk::DisplayCallback(0x124, 3) && hulk::cheats::Level(hulk::cheats::Cheat::Damage) == 3, "one-hit kills chosen");
+    Check(hulk::DisplayCallback(0x120, 1) && hulk::cheats::Level(hulk::cheats::Cheat::Invulnerability) == 1, "invulnerability on");
+    Check(hulk::DisplayCallback(0x120, 0) && hulk::cheats::Level(hulk::cheats::Cheat::Invulnerability) == 0, "and off again");
+    Check(hulk::DisplayCallback(0x124, 7) && hulk::cheats::Level(hulk::cheats::Cheat::Damage) == 3, "a choice past a cheat's is ignored");
+    Check(!hulk::DisplayCallback(0x128, 1), "past the cheats' owners goes to the game");
+    Check(!hulk::DisplayCallback(0x00123456, 1), "a real AudioQuality owner goes to the game");
+    Check(hulk::DisplayCallback(0x101, 5), "resolution selector");
+    Check(app::settings.width == 3840 && app::settings.height == 2160, "3840 x 2160 chosen");
+    Check(hulk::DisplayCallback(0x100, 2) && app::settings.display_mode == app::DisplayMode::Windowed, "windowed chosen");
+    Check(hulk::DisplayCallback(0x101, 99) && app::settings.width == 3840, "a selection past the choices is ignored");
+    hulk::TickDisplaySettings();
+    Check(app::applied == 0, "changes wait to settle");
+    // the view's settings apply at once, without the window's
+    const uint32_t generation = hulk::ViewGeneration();
+    Check(hulk::DisplayCallback(0x105, 5) && hulk::GetFovIncrease() == 30 && hulk::ViewGeneration() != generation,
+          "+30 field of view applies at once");
+    Check(hulk::DisplayCallback(0x106, 2) && hulk::GetRenderDistance() == 200, "200% render distance applies at once");
+    Check(hulk::DisplayCallback(0x107, 3) && hulk::GetLanguage() == hulk::Language::Italian, "Italian chosen");
+    Check(app::applied == 0, "neither applies the window");
+    std::vector<uint8_t> after = served();
+    std::string again(after.begin(), after.end());
+    Check(again.find("AddNamedValueInt \"PCResolution\" 5 \"PCResolutionChanged\"") != std::string::npos &&
+              again.find("AddNamedValueInt \"PCDisplayMode\" 2 \"PCDisplayModeChanged\"") != std::string::npos,
+          "the script read again starts at the settings as they are");
+    Check(again.find("AddNamedValueInt \"PCCheatDamage\" 3 \"PCCheatDamageChanged\"") != std::string::npos,
+          "the script read again starts at the cheats' levels as they are");
+    Check(again.size() == rcf.size(), "the archive keeps its size");
+
+
+    // the view's arithmetic: degrees added to the game's horizontal field, the planes scaled
+    hulk::SetFovIncrease(20);
+    Check(std::fabs(hulk::AdjustFov(1.5f) - (1.5f + 20.0f * 3.14159265f / 180.0f)) < 1e-5f, "20 degrees wider");
+    Check(std::fabs(hulk::AdjustFov(2.9f) - 170.0f * 3.14159265f / 180.0f) < 1e-4f, "never past 170 degrees");
+    Check(hulk::AdjustFov(3.0f) == 3.0f, "a field already past the limit stays the game's");
+    hulk::SetFovIncrease(1000);
+    Check(hulk::GetFovIncrease() == hulk::kMaxFovIncrease, "the increase is clamped");
+    hulk::SetFovIncrease(0);
+    Check(hulk::AdjustFov(1.3f) == 1.3f, "no increase leaves the game's field");
+    hulk::SetRenderDistance(300);
+    Check(hulk::AdjustDistance(650.0f) == 1950.0f, "300% triples a plane");
+    hulk::SetRenderDistance(5);
+    Check(hulk::GetRenderDistance() == hulk::kMinRenderDistance, "the distance is clamped");
+    hulk::SetRenderDistance(100);
+    Check(hulk::AdjustDistance(3000.0f) == 3000.0f, "100% leaves the game's planes");
+
+    // the camera distance: a wheel notch is 12%, the camera glides to it
+    hulk::SetCameraDistance(100);
+    hulk::TickCameraDistance(0.0f);
+    Check(hulk::AdjustCameraDistance(12.0f) == 12.0f, "100% leaves the game's distance");
+    Check(hulk::StepCameraDistance(-1) && hulk::GetCameraDistance() == 89, "a notch closer");
+    Check(hulk::StepCameraDistance(2) && hulk::GetCameraDistance() == 112, "two notches farther");
+    Check(hulk::AdjustCameraDistance(12.0f) == 12.0f, "the camera has not moved yet");
+    hulk::TickCameraDistance(1.0f / 60.0f);
+    const float glide = hulk::AdjustCameraDistance(100.0f);
+    Check(glide > 100.0f && glide < 112.0f, "one frame later it is on its way");
+    for (int i = 0; i < 120; i++) hulk::TickCameraDistance(1.0f / 60.0f);
+    Check(std::fabs(hulk::AdjustCameraDistance(100.0f) - 112.0f) < 0.01f, "two seconds later it is there");
+    hulk::SetCameraDistance(hulk::kMaxCameraDistance);
+    Check(!hulk::StepCameraDistance(1), "no farther than the farthest");
+    hulk::SetCameraDistance(hulk::kMinCameraDistance);
+    Check(!hulk::StepCameraDistance(-1), "no closer than the closest");
+    hulk::SetCameraDistance(1000);
+    Check(hulk::GetCameraDistance() == hulk::kMaxCameraDistance, "the camera distance is clamped");
+    hulk::Language l;
+    Check(hulk::LanguageFromName("French", l) && l == hulk::Language::French && !hulk::LanguageFromName("german", l),
+          "language names");
+
+    std::printf(failures ? "%d failed\n" : "display menu: all passed\n", failures);
+    return failures ? 1 : 0;
+}
