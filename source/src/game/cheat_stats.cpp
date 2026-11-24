@@ -232,9 +232,19 @@ X86_FUNC(HULK_SUB_IS_UNLOCKABLE_ON) {
 // A character takes damage (thiscall victim: amount, hit, ...; ret 0x18). The hit names its attacker at +8 when its
 // type (+0xC) is a character. Damage x4 doubles the amount on top of the disc's double damage; one-hit kills give the
 // player's hits more than any character's health. Only the call's own argument changes.
+#if defined(HULK_USA)
+bool HulkCoopRefuseHit(uint32_t victim, uint32_t hit);  // game_usa/coop.cpp: friendly fire off between the co-op players
+#endif
 X86_EXTERN_FUNC(HULK_IMP(HULK_SUB_APPLY_DAMAGE));
 X86_FUNC(HULK_SUB_APPLY_DAMAGE) {
     const uint32_t victim = ctx.ecx, hit = X86_MEM32(ctx.esp + 8);
+#if defined(HULK_USA)
+    if (HulkCoopRefuseHit(victim, hit)) {  // the hit is not taken: al = 0, ret 0x18
+        ctx.eax &= ~0xFFu;
+        ctx.esp += 4 + 0x18;
+        return;
+    }
+#endif
     const uint8_t level = LevelNow(Cheat::Damage);
     const uint32_t player = (level || Logging()) ? Player() : 0;
     const bool by_player = player && hit && victim != player && X86_MEM32(hit + 0xC) == 1 &&
